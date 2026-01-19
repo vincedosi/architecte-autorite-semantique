@@ -1,17 +1,16 @@
 """
-🛡️ Architecte d'Autorité Sémantique v8.2 (DEBUG + FIX)
--------------------------------------------------------
-CHANGELOG v8.2:
-- ✅ FIX: Bug critique - la recherche Wikidata ne remplissait pas les champs
-- ✅ NEW: Diagnostic réseau intégré (bouton "Test Connexions")
-- ✅ FIX: Async/await mal géré avec Streamlit
-- ✅ FIX: Session state entity reset intempestif
-- ✅ NEW: Logs plus détaillés pour debug
-- ✅ FIX: Parent Organization via SPARQL P749
+🛡️ Architecte d'Autorité Sémantique v9.0 (Streamlit Cloud Edition)
+-------------------------------------------------------------------
+VERSION OPTIMISÉE POUR STREAMLIT CLOUD:
+- ✅ Cache @st.cache_data pour éviter les appels répétés
+- ✅ Retry avec backoff exponentiel
+- ✅ Headers compatibles Streamlit Cloud
+- ✅ Timeouts adaptés
+- ✅ Gestion robuste des erreurs
 """
 
 import streamlit as st
-import requests  # Plus fiable que httpx avec Streamlit
+import requests
 import json
 import time
 import re
@@ -19,41 +18,29 @@ from dataclasses import dataclass, asdict
 from typing import Optional, List, Dict, Any
 
 # ============================================================================
-# 1. CONFIGURATION
+# 1. CONFIG
 # ============================================================================
-st.set_page_config(
-    page_title="AAS v8.2 DEBUG",
-    page_icon="🛡️",
-    layout="wide"
-)
+st.set_page_config(page_title="AAS v9.0", page_icon="🛡️", layout="wide")
 
-# Session State - Initialisation PROPRE
+# Session State
 if 'logs' not in st.session_state:
     st.session_state.logs = []
 if 'entity' not in st.session_state:
     st.session_state.entity = None
 if 'social_links' not in st.session_state:
     st.session_state.social_links = {k: '' for k in ['linkedin', 'twitter', 'facebook', 'instagram', 'youtube']}
-if 'res_wiki' not in st.session_state:
-    st.session_state.res_wiki = []
-if 'res_insee' not in st.session_state:
-    st.session_state.res_insee = []
 if 'mistral_key' not in st.session_state:
     st.session_state.mistral_key = ''
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
 
-def add_log(msg: str, status: str = "info") -> None:
-    """Log avec timestamp."""
-    icons = {"info": "ℹ️", "success": "✅", "error": "❌", "warning": "⚠️", "debug": "🔧"}
-    timestamp = time.strftime("%H:%M:%S")
-    entry = f"{icons.get(status, '•')} [{timestamp}] {msg}"
+def add_log(msg: str, status: str = "info"):
+    icons = {"info": "ℹ️", "success": "✅", "error": "❌", "warning": "⚠️"}
+    entry = f"{icons.get(status, '•')} {time.strftime('%H:%M:%S')} {msg}"
     st.session_state.logs.append(entry)
-    if len(st.session_state.logs) > 50:
+    if len(st.session_state.logs) > 30:
         st.session_state.logs.pop(0)
-    # Debug console
-    print(entry)
 
 
 # ============================================================================
@@ -77,174 +64,114 @@ class Entity:
     org_type: str = "Organization"
     parent_org_name: str = ""
     parent_org_qid: str = ""
-    parent_org_siren: str = ""
-    address_street: str = ""
-    address_city: str = ""
-    address_postal: str = ""
+    address: str = ""
 
-    def authority_score(self) -> int:
-        score = 0
-        if self.qid: score += 20
-        if self.siren: score += 20
-        if self.lei: score += 15
-        if self.website: score += 15
-        if self.parent_org_qid: score += 10
-        if self.expertise_fr: score += 10
-        if self.address_city: score += 10
-        return min(score, 100)
+    def score(self) -> int:
+        s = 0
+        if self.qid: s += 20
+        if self.siren: s += 20
+        if self.lei: s += 15
+        if self.website: s += 15
+        if self.parent_org_qid: s += 15
+        if self.expertise_fr: s += 15
+        return min(s, 100)
 
 
-# Initialiser entity SI None
 if st.session_state.entity is None:
     st.session_state.entity = Entity()
 
 
 # ============================================================================
-# 3. WIKIDATA ENGINE (SYNCHRONE - plus fiable avec Streamlit)
+# 3. API FUNCTIONS WITH CACHE (STREAMLIT CLOUD OPTIMIZED)
 # ============================================================================
-class WikidataEngine:
-    """Moteur Wikidata SYNCHRONE (requests au lieu de httpx async)."""
+
+@st.cache_data(ttl=300, show_spinner=False)
+def wikidata_search(query: str) -> List[Dict]:
+    """Recherche Wikidata avec cache 5 minutes."""
     
-    HEADERS = {
-        "User-Agent": "SemanticAuthorityArchitect/8.2 (https://votre-site.fr; contact@email.fr) Python/requests",
-        "Accept": "application/json"
+    url = "https://www.wikidata.org/w/api.php"
+    params = {
+        "action": "wbsearchentities",
+        "search": query,
+        "language": "fr",
+        "uselang": "fr",
+        "format": "json",
+        "limit": 10,
+        "type": "item"
+    }
+    # Headers importants pour Streamlit Cloud
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; AAS-Bot/9.0; +https://github.com/)",
+        "Accept": "application/json",
+        "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8"
     }
     
-    ACTION_API = "https://www.wikidata.org/w/api.php"
-    SPARQL = "https://query.wikidata.org/sparql"
-    
-    @staticmethod
-    def test_connection() -> Dict[str, Any]:
-        """Test de connexion aux APIs."""
-        results = {"action_api": False, "sparql": False, "errors": []}
-        
-        # Test Action API
+    # Retry avec backoff
+    for attempt in range(3):
         try:
-            r = requests.get(
-                WikidataEngine.ACTION_API,
-                params={"action": "wbsearchentities", "search": "test", "language": "fr", "format": "json", "limit": 1},
-                headers=WikidataEngine.HEADERS,
-                timeout=10
-            )
-            if r.status_code == 200:
-                results["action_api"] = True
-                add_log(f"Action API OK (HTTP {r.status_code})", "success")
-            else:
-                results["errors"].append(f"Action API: HTTP {r.status_code}")
-                add_log(f"Action API: HTTP {r.status_code}", "error")
-        except Exception as e:
-            results["errors"].append(f"Action API: {str(e)}")
-            add_log(f"Action API error: {str(e)[:50]}", "error")
-        
-        # Test SPARQL
-        try:
-            test_query = "SELECT ?item WHERE { ?item wdt:P31 wd:Q5 } LIMIT 1"
-            r = requests.get(
-                WikidataEngine.SPARQL,
-                params={"query": test_query, "format": "json"},
-                headers=WikidataEngine.HEADERS,
-                timeout=15
-            )
-            if r.status_code == 200:
-                results["sparql"] = True
-                add_log(f"SPARQL OK (HTTP {r.status_code})", "success")
-            else:
-                results["errors"].append(f"SPARQL: HTTP {r.status_code}")
-                add_log(f"SPARQL: HTTP {r.status_code}", "error")
-        except Exception as e:
-            results["errors"].append(f"SPARQL: {str(e)}")
-            add_log(f"SPARQL error: {str(e)[:50]}", "error")
-        
-        return results
-
-    @staticmethod
-    def search(query: str) -> List[Dict]:
-        """Recherche Wikidata via Action API."""
-        add_log(f"🔍 Wikidata search: '{query}'")
-        
-        try:
-            params = {
-                "action": "wbsearchentities",
-                "search": query,
-                "language": "fr",
-                "uselang": "fr",
-                "format": "json",
-                "limit": 10,
-                "type": "item"
-            }
-            
-            response = requests.get(
-                WikidataEngine.ACTION_API,
-                params=params,
-                headers=WikidataEngine.HEADERS,
-                timeout=15
-            )
-            
-            add_log(f"HTTP {response.status_code}", "debug")
+            response = requests.get(url, params=params, headers=headers, timeout=20)
             
             if response.status_code == 200:
                 data = response.json()
                 results = data.get('search', [])
-                add_log(f"Wikidata: {len(results)} résultats trouvés", "success")
-                
-                output = []
-                for item in results:
-                    output.append({
-                        'qid': item['id'],
-                        'label': item.get('label', item['id']),
-                        'desc': item.get('description', 'Pas de description')
-                    })
-                    add_log(f"  → {item['id']}: {item.get('label', '?')}", "debug")
-                
-                return output
+                return [{
+                    'qid': item['id'],
+                    'label': item.get('label', item['id']),
+                    'desc': item.get('description', '')
+                } for item in results]
+            
+            elif response.status_code == 429:
+                # Rate limit - attendre et réessayer
+                time.sleep(2 ** attempt)
+                continue
             else:
-                add_log(f"Wikidata HTTP Error: {response.status_code}", "error")
-                add_log(f"Response: {response.text[:200]}", "debug")
+                return []
                 
         except requests.Timeout:
-            add_log("Wikidata TIMEOUT (15s)", "error")
-        except requests.ConnectionError as e:
-            add_log(f"Wikidata CONNECTION ERROR: {str(e)[:50]}", "error")
-        except Exception as e:
-            add_log(f"Wikidata ERROR: {type(e).__name__}: {str(e)[:50]}", "error")
-        
-        return []
+            if attempt < 2:
+                time.sleep(1)
+                continue
+            return []
+        except Exception:
+            return []
+    
+    return []
 
-    @staticmethod
-    def get_details(qid: str) -> Dict[str, Any]:
-        """Récupère les détails complets via Action API + SPARQL."""
-        add_log(f"📋 Getting details for {qid}")
-        
-        result = {
-            "name_fr": "", "name_en": "", "desc_fr": "", "desc_en": "",
-            "siren": "", "lei": "", "website": "",
-            "parent_name": "", "parent_qid": ""
-        }
-        
-        # 1. Action API pour labels/descriptions
+
+@st.cache_data(ttl=600, show_spinner=False)
+def wikidata_get_entity(qid: str) -> Dict:
+    """Récupère les détails d'une entité avec cache 10 minutes."""
+    
+    url = "https://www.wikidata.org/w/api.php"
+    params = {
+        "action": "wbgetentities",
+        "ids": qid,
+        "languages": "fr|en",
+        "props": "labels|descriptions|claims",
+        "format": "json"
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; AAS-Bot/9.0; +https://github.com/)",
+        "Accept": "application/json"
+    }
+    
+    result = {
+        "name_fr": "", "name_en": "", "desc_fr": "", "desc_en": "",
+        "siren": "", "lei": "", "website": "",
+        "parent_name": "", "parent_qid": ""
+    }
+    
+    for attempt in range(3):
         try:
-            params = {
-                "action": "wbgetentities",
-                "ids": qid,
-                "languages": "fr|en",
-                "props": "labels|descriptions|claims",
-                "format": "json"
-            }
-            
-            response = requests.get(
-                WikidataEngine.ACTION_API,
-                params=params,
-                headers=WikidataEngine.HEADERS,
-                timeout=15
-            )
+            response = requests.get(url, params=params, headers=headers, timeout=20)
             
             if response.status_code == 200:
                 data = response.json()
-                entity_data = data.get('entities', {}).get(qid, {})
+                entity = data.get('entities', {}).get(qid, {})
                 
-                labels = entity_data.get('labels', {})
-                descs = entity_data.get('descriptions', {})
-                claims = entity_data.get('claims', {})
+                labels = entity.get('labels', {})
+                descs = entity.get('descriptions', {})
+                claims = entity.get('claims', {})
                 
                 result["name_fr"] = labels.get('fr', {}).get('value', '')
                 result["name_en"] = labels.get('en', {}).get('value', '')
@@ -252,173 +179,128 @@ class WikidataEngine:
                 result["desc_en"] = descs.get('en', {}).get('value', '')
                 
                 # P1616 = SIREN
-                if 'P1616' in claims:
-                    siren_claims = claims['P1616']
-                    if siren_claims:
-                        result["siren"] = siren_claims[0].get('mainsnak', {}).get('datavalue', {}).get('value', '')
-                        add_log(f"SIREN trouvé: {result['siren']}", "debug")
+                if 'P1616' in claims and claims['P1616']:
+                    result["siren"] = claims['P1616'][0].get('mainsnak', {}).get('datavalue', {}).get('value', '')
                 
                 # P1278 = LEI
-                if 'P1278' in claims:
-                    lei_claims = claims['P1278']
-                    if lei_claims:
-                        result["lei"] = lei_claims[0].get('mainsnak', {}).get('datavalue', {}).get('value', '')
+                if 'P1278' in claims and claims['P1278']:
+                    result["lei"] = claims['P1278'][0].get('mainsnak', {}).get('datavalue', {}).get('value', '')
                 
                 # P856 = Website
-                if 'P856' in claims:
-                    web_claims = claims['P856']
-                    if web_claims:
-                        result["website"] = web_claims[0].get('mainsnak', {}).get('datavalue', {}).get('value', '')
+                if 'P856' in claims and claims['P856']:
+                    result["website"] = claims['P856'][0].get('mainsnak', {}).get('datavalue', {}).get('value', '')
                 
                 # P749 = Parent Organization
-                if 'P749' in claims:
-                    parent_claims = claims['P749']
-                    if parent_claims:
-                        parent_id = parent_claims[0].get('mainsnak', {}).get('datavalue', {}).get('value', {}).get('id', '')
-                        if parent_id:
-                            result["parent_qid"] = parent_id
-                            add_log(f"Parent QID trouvé: {parent_id}", "success")
-                            # Récupérer le nom du parent
-                            parent_data = WikidataEngine._get_label(parent_id)
-                            result["parent_name"] = parent_data
+                if 'P749' in claims and claims['P749']:
+                    parent_data = claims['P749'][0].get('mainsnak', {}).get('datavalue', {}).get('value', {})
+                    if isinstance(parent_data, dict):
+                        result["parent_qid"] = parent_data.get('id', '')
+                    # Récupérer le nom du parent
+                    if result["parent_qid"]:
+                        result["parent_name"] = wikidata_get_label(result["parent_qid"])
                 
-                add_log(f"Action API: données récupérées pour {qid}", "success")
-            else:
-                add_log(f"Action API error: HTTP {response.status_code}", "error")
-                
-        except Exception as e:
-            add_log(f"Action API exception: {str(e)[:50]}", "error")
-        
-        return result
-
-    @staticmethod
-    def _get_label(qid: str) -> str:
-        """Récupère juste le label d'un QID."""
-        try:
-            params = {
-                "action": "wbgetentities",
-                "ids": qid,
-                "languages": "fr|en",
-                "props": "labels",
-                "format": "json"
-            }
-            response = requests.get(
-                WikidataEngine.ACTION_API,
-                params=params,
-                headers=WikidataEngine.HEADERS,
-                timeout=10
-            )
-            if response.status_code == 200:
-                data = response.json()
-                labels = data.get('entities', {}).get(qid, {}).get('labels', {})
-                return labels.get('fr', {}).get('value', '') or labels.get('en', {}).get('value', '')
-        except:
-            pass
-        return ""
-
-
-# ============================================================================
-# 4. INSEE ENGINE
-# ============================================================================
-class INSEEEngine:
-    """API INSEE gratuite."""
-    
-    API_URL = "https://recherche-entreprises.api.gouv.fr/search"
-    
-    @staticmethod
-    def search(query: str) -> List[Dict]:
-        """Recherche entreprise."""
-        add_log(f"🏛️ INSEE search: '{query}'")
-        
-        try:
-            response = requests.get(
-                INSEEEngine.API_URL,
-                params={"q": query, "per_page": 10},
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                results = data.get('results', [])
-                add_log(f"INSEE: {len(results)} entreprises", "success")
-                
-                output = []
-                for item in results:
-                    siege = item.get('siege', {})
-                    output.append({
-                        'siren': item.get('siren', ''),
-                        'siret': siege.get('siret', ''),
-                        'name': item.get('nom_complet', ''),
-                        'legal_name': item.get('nom_raison_sociale', ''),
-                        'naf': item.get('activite_principale', ''),
-                        'address': siege.get('adresse', ''),
-                        'city': siege.get('commune', ''),
-                        'postal': siege.get('code_postal', ''),
-                        'active': item.get('etat_administratif') == 'A'
-                    })
-                return output
-            else:
-                add_log(f"INSEE HTTP {response.status_code}", "error")
-        except Exception as e:
-            add_log(f"INSEE error: {str(e)[:50]}", "error")
-        
-        return []
-
-
-# ============================================================================
-# 5. MISTRAL ENGINE
-# ============================================================================
-class MistralEngine:
-    """Enrichissement Mistral AI."""
-    
-    @staticmethod
-    def optimize(api_key: str, entity: Entity) -> Optional[Dict]:
-        """Génère descriptions + détecte parent."""
-        if not api_key:
-            add_log("Mistral: clé manquante", "error")
-            return None
-        
-        add_log("🤖 Mistral: génération GEO...")
-        
-        prompt = f"""Expert SEO. Analyse cette entreprise:
-NOM: {entity.name}
-SIREN: {entity.siren or 'N/A'}
-QID: {entity.qid or 'N/A'}
-
-Génère en JSON STRICT:
-{{"description_fr": "...", "description_en": "...", "expertise_fr": "A, B, C", "expertise_en": "X, Y, Z", "parent_org_name": "nom ou null", "parent_org_qid": "Qxxxxx ou null"}}"""
-
-        try:
-            response = requests.post(
-                "https://api.mistral.ai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={
-                    "model": "mistral-small-latest",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0.2
-                },
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                content = response.json()['choices'][0]['message']['content']
-                result = json.loads(content)
-                add_log("Mistral: OK", "success")
                 return result
-            else:
-                add_log(f"Mistral HTTP {response.status_code}", "error")
-        except Exception as e:
-            add_log(f"Mistral error: {str(e)[:40]}", "error")
+                
+            elif response.status_code == 429:
+                time.sleep(2 ** attempt)
+                continue
+                
+        except Exception:
+            if attempt < 2:
+                time.sleep(1)
+                continue
+    
+    return result
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def wikidata_get_label(qid: str) -> str:
+    """Récupère juste le label d'un QID."""
+    try:
+        url = "https://www.wikidata.org/w/api.php"
+        params = {
+            "action": "wbgetentities",
+            "ids": qid,
+            "languages": "fr|en",
+            "props": "labels",
+            "format": "json"
+        }
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; AAS-Bot/9.0)"}
         
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            labels = data.get('entities', {}).get(qid, {}).get('labels', {})
+            return labels.get('fr', {}).get('value', '') or labels.get('en', {}).get('value', '')
+    except:
+        pass
+    return ""
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def insee_search(query: str) -> List[Dict]:
+    """Recherche INSEE avec cache 5 minutes."""
+    
+    try:
+        url = "https://recherche-entreprises.api.gouv.fr/search"
+        params = {"q": query, "per_page": 10}
+        
+        response = requests.get(url, params=params, timeout=15)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get('results', [])
+            
+            return [{
+                'siren': item.get('siren', ''),
+                'siret': item.get('siege', {}).get('siret', ''),
+                'name': item.get('nom_complet', ''),
+                'legal_name': item.get('nom_raison_sociale', ''),
+                'naf': item.get('activite_principale', ''),
+                'address': f"{item.get('siege', {}).get('adresse', '')} {item.get('siege', {}).get('code_postal', '')} {item.get('siege', {}).get('commune', '')}",
+                'active': item.get('etat_administratif') == 'A'
+            } for item in results]
+    except:
+        pass
+    
+    return []
+
+
+def mistral_optimize(api_key: str, entity: Entity) -> Optional[Dict]:
+    """Enrichissement Mistral."""
+    if not api_key:
         return None
+    
+    prompt = f"""Expert SEO. Analyse: {entity.name} (SIREN: {entity.siren or 'N/A'})
+Génère JSON: {{"description_fr": "...", "description_en": "...", "expertise_fr": "A, B", "expertise_en": "X, Y", "parent_org_name": "ou null", "parent_org_qid": "Qxxx ou null"}}"""
+
+    try:
+        response = requests.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": "mistral-small-latest",
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.2
+            },
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            content = response.json()['choices'][0]['message']['content']
+            return json.loads(content)
+    except:
+        pass
+    
+    return None
 
 
 # ============================================================================
-# 6. AUTHENTICATION
+# 4. AUTH
 # ============================================================================
 if not st.session_state.authenticated:
-    st.title("🛡️ AAS v8.2 DEBUG")
+    st.title("🛡️ AAS v9.0 - Streamlit Cloud")
     pwd = st.text_input("Mot de passe:", type="password")
     if st.button("Déverrouiller"):
         if pwd == "SEOTOOLS":
@@ -428,27 +310,15 @@ if not st.session_state.authenticated:
 
 
 # ============================================================================
-# 7. SIDEBAR
+# 5. SIDEBAR
 # ============================================================================
 with st.sidebar:
-    st.header("⚙️ AAS v8.2")
+    st.header("⚙️ AAS v9.0")
     
-    # Console Logs
-    with st.expander("📟 Console DEBUG", expanded=True):
-        log_area = st.container(height=200)
-        with log_area:
-            for log in reversed(st.session_state.logs[-20:]):
-                st.caption(log)
-    
-    # Test de connexion
-    st.divider()
-    if st.button("🔌 Test Connexions API", use_container_width=True):
-        with st.spinner("Test en cours..."):
-            results = WikidataEngine.test_connection()
-            if results["action_api"] and results["sparql"]:
-                st.success("✅ Toutes les APIs sont OK!")
-            else:
-                st.error(f"❌ Erreurs: {', '.join(results['errors'])}")
+    # Logs
+    with st.expander("📟 Logs", expanded=False):
+        for log in reversed(st.session_state.logs[-10:]):
+            st.caption(log)
     
     st.divider()
     st.session_state.mistral_key = st.text_input("Clé Mistral", st.session_state.mistral_key, type="password")
@@ -456,89 +326,115 @@ with st.sidebar:
     st.divider()
     st.subheader("🔍 Recherche")
     
-    search_source = st.radio("Source", ["Wikidata", "INSEE", "Les deux"], horizontal=True)
-    search_query = st.text_input("Nom ou SIREN")
+    search_source = st.radio("Source", ["🌐 Wikidata", "🏛️ INSEE", "🔄 Les deux"], horizontal=True)
+    search_query = st.text_input("Nom de l'organisation")
     
-    if st.button("🔎 Rechercher", type="primary", use_container_width=True):
-        if search_query:
-            add_log(f"=== Nouvelle recherche: '{search_query}' ===", "info")
-            
-            if search_source in ["Wikidata", "Les deux"]:
-                st.session_state.res_wiki = WikidataEngine.search(search_query)
-            
-            if search_source in ["INSEE", "Les deux"]:
-                st.session_state.res_insee = INSEEEngine.search(search_query)
-            
+    col1, col2 = st.columns(2)
+    with col1:
+        search_btn = st.button("🔎 Chercher", type="primary", use_container_width=True)
+    with col2:
+        if st.button("🗑️ Reset", use_container_width=True):
+            st.session_state.entity = Entity()
+            st.cache_data.clear()
             st.rerun()
     
-    # Résultats Wikidata
-    if st.session_state.res_wiki:
+    # Recherche
+    if search_btn and search_query:
+        add_log(f"Recherche: {search_query}", "info")
+        
+        wiki_results = []
+        insee_results = []
+        
+        if "Wikidata" in search_source or "deux" in search_source:
+            with st.spinner("Wikidata..."):
+                wiki_results = wikidata_search(search_query)
+                if wiki_results:
+                    add_log(f"Wikidata: {len(wiki_results)} résultats", "success")
+                else:
+                    add_log("Wikidata: aucun résultat", "warning")
+        
+        if "INSEE" in search_source or "deux" in search_source:
+            with st.spinner("INSEE..."):
+                insee_results = insee_search(search_query)
+                if insee_results:
+                    add_log(f"INSEE: {len(insee_results)} résultats", "success")
+                else:
+                    add_log("INSEE: aucun résultat", "warning")
+        
+        # Stocker les résultats dans session state
+        st.session_state['wiki_results'] = wiki_results
+        st.session_state['insee_results'] = insee_results
+        st.rerun()
+    
+    # Afficher résultats Wikidata
+    wiki_results = st.session_state.get('wiki_results', [])
+    if wiki_results:
         st.markdown("**🌐 Wikidata:**")
-        for i, item in enumerate(st.session_state.res_wiki[:6]):
-            btn_label = f"{item['qid']}: {item['label'][:25]}"
-            if st.button(btn_label, key=f"w_{i}_{item['qid']}", use_container_width=True):
+        for i, item in enumerate(wiki_results[:6]):
+            btn_key = f"wiki_{item['qid']}_{i}"
+            if st.button(f"🔗 {item['qid']}: {item['label'][:20]}", key=btn_key, use_container_width=True):
                 add_log(f"Sélection: {item['qid']}", "info")
                 
-                # Récupérer les détails
-                details = WikidataEngine.get_details(item['qid'])
+                with st.spinner(f"Chargement {item['qid']}..."):
+                    details = wikidata_get_entity(item['qid'])
                 
-                # Mettre à jour l'entity
                 e = st.session_state.entity
                 e.qid = item['qid']
                 e.name = details['name_fr'] or item['label']
                 e.name_en = details['name_en']
                 e.description_fr = details['desc_fr']
                 e.description_en = details['desc_en']
-                e.siren = e.siren or details['siren']  # Ne pas écraser si déjà présent
+                e.siren = e.siren or details['siren']
                 e.lei = details['lei']
                 e.website = e.website or details['website']
                 
                 if details['parent_qid']:
                     e.parent_org_qid = details['parent_qid']
                     e.parent_org_name = details['parent_name']
-                    add_log(f"Parent: {e.parent_org_name} ({e.parent_org_qid})", "success")
+                    add_log(f"Parent: {e.parent_org_name}", "success")
                 
-                add_log(f"Entity mise à jour: {e.name}", "success")
+                add_log(f"Chargé: {e.name}", "success")
                 st.rerun()
     
-    # Résultats INSEE
-    if st.session_state.res_insee:
+    # Afficher résultats INSEE
+    insee_results = st.session_state.get('insee_results', [])
+    if insee_results:
         st.markdown("**🏛️ INSEE:**")
-        for i, item in enumerate(st.session_state.res_insee[:6]):
-            status = "🟢" if item.get('active', True) else "🔴"
-            btn_label = f"{status} {item['name'][:25]}"
-            if st.button(btn_label, key=f"i_{i}_{item['siren']}", use_container_width=True):
+        for i, item in enumerate(insee_results[:6]):
+            status = "🟢" if item.get('active') else "🔴"
+            btn_key = f"insee_{item['siren']}_{i}"
+            if st.button(f"{status} {item['name'][:22]}", key=btn_key, use_container_width=True):
                 e = st.session_state.entity
                 e.name = e.name or item['name']
                 e.legal_name = item.get('legal_name', '')
                 e.siren = item['siren']
                 e.siret = item.get('siret', '')
                 e.naf = item.get('naf', '')
-                e.address_street = item.get('address', '')
-                e.address_city = item.get('city', '')
-                e.address_postal = item.get('postal', '')
-                add_log(f"INSEE chargé: {item['name']}", "success")
+                e.address = item.get('address', '')
+                add_log(f"INSEE: {item['name']}", "success")
                 st.rerun()
 
 
 # ============================================================================
-# 8. MAIN UI
+# 6. MAIN
 # ============================================================================
-st.title("🛡️ Architecte d'Autorité Sémantique v8.2")
+st.title("🛡️ Architecte d'Autorité Sémantique v9.0")
 
 e = st.session_state.entity
 
-# Score
+# Métriques
 if e.name or e.qid or e.siren:
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        score = e.authority_score()
+        score = e.score()
         color = "🟢" if score >= 70 else "🟡" if score >= 40 else "🔴"
         st.metric("Score", f"{color} {score}/100")
     with col2:
         st.metric("QID", e.qid or "—")
     with col3:
         st.metric("SIREN", e.siren or "—")
+    with col4:
+        st.metric("Parent", e.parent_org_qid or "—")
 
 # Tabs
 if e.name or e.siren or e.qid:
@@ -551,24 +447,14 @@ if e.name or e.siren or e.qid:
             e.name = st.text_input("Nom", e.name)
             e.legal_name = st.text_input("Raison sociale", e.legal_name)
             e.siren = st.text_input("SIREN", e.siren)
-            e.siret = st.text_input("SIRET", e.siret)
         with col2:
             e.qid = st.text_input("QID Wikidata", e.qid)
             e.lei = st.text_input("LEI", e.lei)
-            e.naf = st.text_input("NAF", e.naf)
             e.website = st.text_input("Site web", e.website)
-        
-        st.divider()
-        e.address_street = st.text_input("Adresse", e.address_street)
-        col1, col2 = st.columns(2)
-        with col1:
-            e.address_postal = st.text_input("CP", e.address_postal)
-        with col2:
-            e.address_city = st.text_input("Ville", e.address_city)
+            e.address = st.text_input("Adresse", e.address)
     
     with tabs[1]:
         st.subheader("🔗 Filiation (Parent Organization)")
-        
         col1, col2 = st.columns(2)
         with col1:
             e.parent_org_name = st.text_input("Nom maison mère", e.parent_org_name)
@@ -577,13 +463,12 @@ if e.name or e.siren or e.qid:
         
         if e.parent_org_qid:
             st.success(f"✅ Lié à: [{e.parent_org_name}](https://www.wikidata.org/wiki/{e.parent_org_qid})")
-        elif e.qid:
-            st.info("ℹ️ Aucun parent trouvé dans Wikidata. Utilisez Mistral pour détecter automatiquement.")
     
     with tabs[2]:
         if st.button("🪄 Auto-Optimize (Mistral)", type="primary"):
             if st.session_state.mistral_key:
-                result = MistralEngine.optimize(st.session_state.mistral_key, e)
+                with st.spinner("Mistral..."):
+                    result = mistral_optimize(st.session_state.mistral_key, e)
                 if result:
                     e.description_fr = result.get('description_fr', e.description_fr)
                     e.description_en = result.get('description_en', e.description_en)
@@ -593,17 +478,19 @@ if e.name or e.siren or e.qid:
                         e.parent_org_name = result['parent_org_name']
                     if not e.parent_org_qid and result.get('parent_org_qid'):
                         e.parent_org_qid = result['parent_org_qid']
+                    add_log("Mistral OK", "success")
                     st.rerun()
+                else:
+                    st.error("Mistral a échoué")
             else:
                 st.error("Clé Mistral requise")
         
-        e.description_fr = st.text_area("Description FR", e.description_fr, height=100)
-        e.description_en = st.text_area("Description EN", e.description_en, height=100)
+        e.description_fr = st.text_area("Description FR", e.description_fr, height=80)
+        e.description_en = st.text_area("Description EN", e.description_en, height=80)
         e.expertise_fr = st.text_input("Expertise FR", e.expertise_fr)
-        e.expertise_en = st.text_input("Expertise EN", e.expertise_en)
     
     with tabs[3]:
-        # Build JSON-LD
+        # JSON-LD
         same_as = []
         if e.qid:
             same_as.append(f"https://www.wikidata.org/wiki/{e.qid}")
@@ -621,11 +508,7 @@ if e.name or e.siren or e.qid:
             if e.parent_org_qid:
                 parent["sameAs"] = f"https://www.wikidata.org/wiki/{e.parent_org_qid}"
         
-        json_ld = {
-            "@context": "https://schema.org",
-            "@type": e.org_type,
-            "name": e.name
-        }
+        json_ld = {"@context": "https://schema.org", "@type": e.org_type, "name": e.name}
         
         if e.legal_name:
             json_ld["legalName"] = e.legal_name
@@ -640,41 +523,31 @@ if e.name or e.siren or e.qid:
             json_ld["identifier"] = identifiers
         if same_as:
             json_ld["sameAs"] = same_as
-        if e.address_city:
-            json_ld["address"] = {
-                "@type": "PostalAddress",
-                "streetAddress": e.address_street,
-                "postalCode": e.address_postal,
-                "addressLocality": e.address_city,
-                "addressCountry": "FR"
-            }
         if parent:
             json_ld["parentOrganization"] = parent
         
         st.json(json_ld)
         
-        col1, col2 = st.columns(2)
-        with col1:
-            st.download_button("📄 JSON-LD", json.dumps(json_ld, indent=2, ensure_ascii=False), f"jsonld_{e.siren or 'export'}.json")
-        with col2:
-            config = {"entity": asdict(e), "social_links": st.session_state.social_links}
-            st.download_button("💾 Config", json.dumps(config, indent=2, ensure_ascii=False), f"config_{e.siren or 'export'}.json")
+        st.download_button(
+            "💾 Télécharger JSON-LD",
+            json.dumps(json_ld, indent=2, ensure_ascii=False),
+            f"jsonld_{e.siren or 'export'}.json",
+            mime="application/json"
+        )
 
 else:
     st.info("👈 Recherchez une entreprise dans la sidebar")
     
     st.markdown("""
-    ### 🐛 Mode DEBUG v8.2
+    ### ☁️ Version Streamlit Cloud v9.0
     
-    1. Cliquez sur **"Test Connexions API"** pour vérifier que Wikidata répond
-    2. Regardez la **Console DEBUG** pour voir les erreurs en temps réel
-    3. Le bouton recherche utilise maintenant `requests` (synchrone) au lieu de `httpx` (async)
+    **Optimisations:**
+    - 🔄 Cache automatique (évite les appels répétés)
+    - ⏱️ Retry avec backoff exponentiel
+    - 🌐 Headers compatibles cloud
     
-    **Informations Boursorama (pour test):**
-    - QID Wikidata: `Q2110465`
-    - SIREN: `351058151`
-    - Parent: Société Générale (`Q270618`)
+    **Test rapide:** Cherchez "Boursorama" ou "IKEA"
     """)
 
 st.divider()
-st.caption("🛡️ AAS v8.2 DEBUG | Wikidata + INSEE | requests synchrone")
+st.caption("🛡️ AAS v9.0 | Streamlit Cloud Edition | Wikidata + INSEE")
