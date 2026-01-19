@@ -1,10 +1,10 @@
 """
-🛡️ Architecte d'Autorité Sémantique v6.1 (Security & Persistence)
+🛡️ Architecte d'Autorité Sémantique v6.2 (Resilience Edition)
 ------------------------------------------------------------------
-- Protection : Accès restreint par mot de passe (SEOTOOLS).
-- Persistance : Export/Import de configurations complètes en JSON.
-- Robustesse : Correctif JSONDecodeError avec gestion d'erreurs API.
-- Performance : Moteur asynchrone httpx + asyncio.
+- Fix : Wikidata Search (User-Agent & Error Handling).
+- Sécurité : Mot de passe (SEOTOOLS).
+- Persistance : Import/Export JSON Config.
+- Performance : Asyncio + httpx optimisé.
 """
 
 import streamlit as st
@@ -26,7 +26,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Gestion du mot de passe
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
@@ -35,37 +34,20 @@ def check_password():
         return True
     
     st.title("🛡️ Accès Restreint")
-    pwd = st.text_input("Veuillez entrer le mot de passe pour accéder à l'outil :", type="password")
+    pwd = st.text_input("Mot de passe :", type="password")
     if st.button("Se connecter"):
         if pwd == "SEOTOOLS":
             st.session_state.authenticated = True
-            st.success("Accès autorisé !")
-            time.sleep(1)
             st.rerun()
         else:
-            st.error("Mot de passe incorrect.")
+            st.error("Accès refusé.")
     return False
 
 if not check_password():
     st.stop()
 
 # ============================================================================
-# 2. STYLES CSS
-# ============================================================================
-st.markdown("""
-<style>
-    .main { background-color: #F8FAFC; }
-    .stTabs [data-baseweb="tab-list"] { 
-        gap: 8px; background: white; padding: 10px; border-radius: 12px; border: 1px solid #E5E7EB;
-    }
-    .stTabs [aria-selected="true"] { background-color: #0066FF !important; color: white !important; }
-    section[data-testid="stSidebar"] { background-color: #FFFFFF; border-right: 1px solid #E5E7EB; }
-    .stMetric { background: white; padding: 15px; border-radius: 10px; border: 1px solid #E5E7EB; }
-</style>
-""", unsafe_allow_html=True)
-
-# ============================================================================
-# 3. DATA MODELS
+# 2. DATA MODELS
 # ============================================================================
 @dataclass
 class Entity:
@@ -108,9 +90,14 @@ class Relation:
     include: bool = True
 
 # ============================================================================
-# 4. MOTEUR DE REQUÊTAGE ASYNCHRONE (CORRIGÉ)
+# 3. ASYNC API MANAGER (ROBUSTE)
 # ============================================================================
 class AsyncAPIManager:
+    # On utilise un User-Agent qui respecte les règles de Wikidata
+    HEADERS = {
+        "User-Agent": "SemanticAuthorityBot/6.2 (https://votre-site.com; contact@votre-email.com) httpx/python",
+        "Accept": "application/json"
+    }
     WIKI_SEARCH = "https://www.wikidata.org/w/api.php"
     WIKI_SPARQL = "https://query.wikidata.org/sparql"
     INSEE_API = "https://recherche-entreprises.api.gouv.fr/search"
@@ -118,19 +105,27 @@ class AsyncAPIManager:
     @staticmethod
     async def search_wikidata(client: httpx.AsyncClient, query: str) -> List[Dict]:
         try:
-            p = {"action": "wbsearchentities", "search": query, "language": "fr", "format": "json", "limit": 8}
-            r = await client.get(AsyncAPIManager.WIKI_SEARCH, params=p)
+            p = {
+                "action": "wbsearchentities",
+                "search": query,
+                "language": "fr",
+                "format": "json",
+                "limit": 8,
+                "type": "item"
+            }
+            r = await client.get(AsyncAPIManager.WIKI_SEARCH, params=p, headers=AsyncAPIManager.HEADERS, timeout=10.0)
             if r.status_code == 200:
-                data = r.json()
-                return [{'qid': i['id'], 'label': i.get('label', ''), 'src': 'wiki'} for i in data.get('search', [])]
+                return [{'qid': i['id'], 'label': i.get('label', ''), 'src': 'wiki'} for i in r.json().get('search', [])]
+            elif r.status_code == 429:
+                st.sidebar.warning("Wikidata : Trop de requêtes. Attendez 30s.")
             return []
-        except Exception as e:
+        except Exception:
             return []
 
     @staticmethod
     async def search_insee(client: httpx.AsyncClient, query: str) -> List[Dict]:
         try:
-            r = await client.get(AsyncAPIManager.INSEE_API, params={"q": query, "per_page": 8})
+            r = await client.get(AsyncAPIManager.INSEE_API, params={"q": query, "per_page": 8}, timeout=10.0)
             if r.status_code == 200:
                 res = r.json().get('results', [])
                 return [{'label': r['nom_complet'], 'siren': r['siren'], 'raw': r, 'src': 'insee'} for r in res]
@@ -150,7 +145,7 @@ class AsyncAPIManager:
           SERVICE wikibase:label {{ bd:serviceParam wikibase:language "fr,en". }}
         }} LIMIT 1"""
         try:
-            r = await client.get(AsyncAPIManager.WIKI_SPARQL, params={'query': q, 'format': 'json'})
+            r = await client.get(AsyncAPIManager.WIKI_SPARQL, params={'query': q, 'format': 'json'}, headers=AsyncAPIManager.HEADERS, timeout=15.0)
             if r.status_code == 200:
                 b = r.json()['results']['bindings']
                 return b[0] if b else {}
@@ -159,7 +154,7 @@ class AsyncAPIManager:
             return {}
 
 # ============================================================================
-# 5. GRAPH RENDERER
+# 4. GRAPH RENDERER (DYNAMIQUE)
 # ============================================================================
 def render_authority_graph(entity: Entity, relations: List[Relation], social_links: Dict[str, str]):
     W, H = 850, 720
@@ -205,12 +200,12 @@ def render_authority_graph(entity: Entity, relations: List[Relation], social_lin
 
     score = entity.authority_score()
     svg += f'<circle cx="{CX}" cy="{CY}" r="78" fill="url(#gr)" filter="url(#sh)" />'
-    svg += f'<text x="{CX}" y="{CY+18}" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="40" fill="white">{score}%</text>'
+    svg += f'<text x="{CX}" y="{CY+15}" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="40" fill="white">{score}%</text>'
     svg += '</svg>'
     return svg
 
 # ============================================================================
-# 6. INITIALISATION & SIDEBAR
+# 5. INITIALISATION SESSION
 # ============================================================================
 if 'entity' not in st.session_state: st.session_state.entity = Entity()
 if 'relations' not in st.session_state: st.session_state.relations = []
@@ -219,6 +214,9 @@ if 'social_links' not in st.session_state:
 if 'res_wiki' not in st.session_state: st.session_state.res_wiki = []
 if 'res_insee' not in st.session_state: st.session_state.res_insee = []
 
+# ============================================================================
+# 6. SIDEBAR (LOGIQUE RECHERCHE)
+# ============================================================================
 async def run_search(q, mode):
     async with httpx.AsyncClient() as client:
         tasks = []
@@ -228,19 +226,19 @@ async def run_search(q, mode):
         return results
 
 with st.sidebar:
-    st.title("🛡️ AAS Admin")
-    mode = st.radio("Source", ["Mixte", "Wikidata", "INSEE"], horizontal=True)
-    query = st.text_input("Recherche organisation")
+    st.header("🔍 Recherche")
+    src_mode = st.radio("Source", ["Mixte", "Wikidata", "INSEE"], horizontal=True)
+    query = st.text_input("Nom de l'entité")
     if st.button("Lancer l'audit", type="primary", use_container_width=True) and query:
-        res = asyncio.run(run_search(query, mode))
-        if mode == "Mixte": 
-            st.session_state.res_wiki, st.session_state.res_insee = res[0], res[1]
-        elif mode == "Wikidata": 
-            st.session_state.res_wiki, st.session_state.res_insee = res[0], []
-        else: 
-            st.session_state.res_wiki, st.session_state.res_insee = [], res[0]
+        with st.spinner("Appel des API..."):
+            res = asyncio.run(run_search(query, src_mode))
+            if src_mode == "Mixte": 
+                st.session_state.res_wiki, st.session_state.res_insee = res[0], res[1]
+            elif src_mode == "Wikidata": 
+                st.session_state.res_wiki, st.session_state.res_insee = res[0], []
+            else: 
+                st.session_state.res_wiki, st.session_state.res_insee = [], res[0]
 
-    # Affichage des résultats Wiki
     if st.session_state.res_wiki:
         st.subheader("🌐 Wikidata")
         for i, r in enumerate(st.session_state.res_wiki[:5]):
@@ -255,7 +253,6 @@ with st.sidebar:
                 st.session_state.entity = e
                 st.rerun()
 
-    # Affichage des résultats INSEE
     if st.session_state.res_insee:
         st.subheader("🏢 INSEE")
         for i, r in enumerate(st.session_state.res_insee[:5]):
@@ -268,19 +265,19 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
-    if st.button("🗑️ Reset Dossier", use_container_width=True):
+    if st.button("🗑️ Reset", use_container_width=True):
         st.session_state.entity = Entity()
         st.session_state.relations = []
         st.session_state.social_links = {k:'' for k in st.session_state.social_links}
         st.rerun()
 
 # ============================================================================
-# 7. MAIN INTERFACE
+# 7. MAIN UI
 # ============================================================================
-st.title("🛡️ Architecte d'Autorité Sémantique v6.1")
+st.title("🛡️ Architecte d'Autorité Sémantique v6.2")
 
 if st.session_state.entity.name or st.session_state.entity.siren:
-    tabs = st.tabs(["🎯 Carte", "🆔 Identité", "🏢 Écosystème", "📱 Social Hub", "💾 Export", "⚙️ Config Manager"])
+    tabs = st.tabs(["🎯 Carte", "🆔 Identité", "🏢 Écosystème", "📱 Social Hub", "💾 Export", "⚙️ Config"])
     e = st.session_state.entity
     
     with tabs[0]: 
@@ -289,106 +286,58 @@ if st.session_state.entity.name or st.session_state.entity.siren:
     with tabs[1]:
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("##### 🏢 Identité")
             e.org_type = st.selectbox("Type Schema.org", ["Organization", "InsuranceAgency", "BankOrCreditUnion", "LocalBusiness"])
-            e.name = st.text_input("Nom (FR)", e.name)
-            e.name_en = st.text_input("Nom (EN)", e.name_en)
-            e.siren = st.text_input("SIREN", e.siren)
-            e.address = st.text_input("Adresse Siège", e.address)
+            e.name, e.name_en = st.text_input("Nom (FR)", e.name), st.text_input("Nom (EN)", e.name_en)
+            e.siren, e.address = st.text_input("SIREN", e.siren), st.text_input("Adresse", e.address)
         with c2:
-            st.markdown("##### 🌐 Identifiants")
-            e.qid = st.text_input("Wikidata QID", e.qid)
-            e.website = st.text_input("URL Site Web", e.website)
-            e.lei = st.text_input("Code LEI", e.lei)
-            e.ror = st.text_input("ROR ID", e.ror)
-            e.isni = st.text_input("ISNI", e.isni)
+            e.qid, e.website = st.text_input("Wikidata QID", e.qid), st.text_input("Site Web", e.website)
+            e.lei, e.ror, e.isni = st.text_input("LEI", e.lei), st.text_input("ROR", e.ror), st.text_input("ISNI", e.isni)
         st.session_state.entity = e
 
     with tabs[2]:
-        st.markdown("##### 🏢 Gérer les Filiales / Relations")
         with st.expander("➕ Ajouter Relation"):
-            f1, f2, f3 = st.columns([2, 1, 1])
-            rn, ru = f1.text_input("Nom Entité"), f2.text_input("URL / Wiki")
-            rt = f3.selectbox("Type", ["Organization", "Brand"])
-            if st.button("Ajouter à la liste"):
-                st.session_state.relations.append(Relation(name=rn, url=ru, schema_type=rt))
+            f1, f2 = st.columns(2)
+            rn, ru = f1.text_input("Nom"), f2.text_input("URL")
+            if st.button("Ajouter"):
+                st.session_state.relations.append(Relation(name=rn, url=ru))
                 st.rerun()
         if st.session_state.relations:
             df = pd.DataFrame([asdict(r) for r in st.session_state.relations])
-            edited_df = st.data_editor(df, use_container_width=True, hide_index=True)
-            if st.button("Sauvegarder modifications"):
-                st.session_state.relations = [Relation(**row) for row in edited_df.to_dict('records')]
+            edited = st.data_editor(df, use_container_width=True, hide_index=True)
+            if st.button("Sauvegarder"):
+                st.session_state.relations = [Relation(**row) for row in edited.to_dict('records')]
                 st.rerun()
 
     with tabs[3]:
-        st.markdown("##### 📱 Liens Sociaux")
         sc1, sc2 = st.columns(2)
-        networks = list(st.session_state.social_links.keys())
-        for i, net in enumerate(networks):
+        for i, net in enumerate(st.session_state.social_links.keys()):
             with (sc1 if i % 2 == 0 else sc2):
                 st.session_state.social_links[net] = st.text_input(f"Lien {net.capitalize()}", st.session_state.social_links[net])
 
     with tabs[4]:
-        # --- EXPORT JSON-LD OPTIMAL ---
         json_ld = {
             "@context": "https://schema.org",
             "@type": e.org_type,
             "@id": f"{e.website.rstrip('/')}/#organization" if e.website else None,
             "name": [{"@language": "fr", "@value": e.name}, {"@language": "en", "@value": e.name_en or e.name}],
             "url": e.website,
-            "--- IDENTIFIANTS (TRUST) ---": "",
             "taxID": f"FR{e.siren}" if e.siren else None,
-            "identifier": [
-                {"@type": "PropertyValue", "propertyID": "SIREN", "value": e.siren} if e.siren else None,
-                {"@type": "PropertyValue", "propertyID": "LEI", "value": e.lei} if e.lei else None
-            ],
-            "--- AUTORITÉ (SAMEAS) ---": "",
-            "sameAs": [
-                f"https://www.wikidata.org/wiki/{e.qid}" if e.qid else None,
-                f"https://annuaire-entreprises.data.gouv.fr/entreprise/{e.siren}" if e.siren else None,
-                *[v for v in st.session_state.social_links.values() if v]
-            ]
+            "identifier": [{"@type": "PropertyValue", "propertyID": "SIREN", "value": e.siren}] if e.siren else [],
+            "sameAs": [f"https://www.wikidata.org/wiki/{e.qid}" if e.qid else None] + [v for v in st.session_state.social_links.values() if v]
         }
-        json_ld["identifier"] = [i for i in json_ld["identifier"] if i]
-        json_ld["sameAs"] = [s for s in json_ld["sameAs"] if s]
-        
         st.json(json_ld)
-        st.download_button("📥 Télécharger JSON-LD", json.dumps(json_ld, indent=2, ensure_ascii=False), f"schema_{e.name}.json")
+        st.download_button("📥 Télécharger JSON-LD", json.dumps(json_ld, indent=2, ensure_ascii=False), "schema.json")
 
     with tabs[5]:
-        st.markdown("##### 💾 Gestion de la Configuration")
-        st.info("Sauvegardez l'état actuel de votre audit pour le reprendre plus tard.")
-        
-        # Création du fichier de config
-        config_data = {
-            "entity": asdict(st.session_state.entity),
-            "relations": [asdict(r) for r in st.session_state.relations],
-            "social_links": st.session_state.social_links
-        }
-        config_json = json.dumps(config_data, indent=2, ensure_ascii=False)
-        
-        st.download_button(
-            "💾 Exporter la Config (JSON)",
-            config_json,
-            file_name=f"config_{e.name.replace(' ', '_')}.json",
-            mime="application/json",
-            use_container_width=True
-        )
-        
-        st.divider()
-        st.markdown("##### 📥 Charger une Config")
-        uploaded_file = st.file_uploader("Choisissez un fichier de config .json", type="json")
-        if uploaded_file is not None:
-            try:
-                new_config = json.load(uploaded_file)
-                st.session_state.entity = Entity(**new_config['entity'])
-                st.session_state.relations = [Relation(**r) for r in new_config['relations']]
-                st.session_state.social_links = new_config['social_links']
-                st.success("Configuration chargée avec succès !")
-                time.sleep(1)
-                st.rerun()
-            except Exception as ex:
-                st.error(f"Erreur lors du chargement : {ex}")
-
+        config = {"entity": asdict(st.session_state.entity), "relations": [asdict(r) for r in st.session_state.relations], "social": st.session_state.social_links}
+        st.download_button("💾 Exporter Config", json.dumps(config, indent=2, ensure_ascii=False), "config.json")
+        uploaded = st.file_uploader("📥 Importer Config", type="json")
+        if uploaded:
+            data = json.load(uploaded)
+            st.session_state.entity = Entity(**data['entity'])
+            st.session_state.relations = [Relation(**r) for r in data['relations']]
+            st.session_state.social_links = data['social']
+            st.success("Config chargée !")
+            st.rerun()
 else:
-    st.info("👈 Utilisez la barre latérale pour rechercher ou charger une configuration.")
+    st.info("👈 Recherchez une entité à gauche.")
