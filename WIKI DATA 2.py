@@ -1,7 +1,7 @@
 """
-🛡️ Architecte d'Autorité Sémantique v9.1 (DEBUG VISIBLE)
----------------------------------------------------------
-LOGS VISIBLES EN TEMPS RÉEL DANS L'INTERFACE
+🛡️ Architecte d'Autorité Sémantique v9.2
+=========================================
+BANDEAU VERSION ULTRA VISIBLE + LOGS TEMPS RÉEL
 """
 
 import streamlit as st
@@ -9,14 +9,15 @@ import requests
 import json
 import time
 from dataclasses import dataclass, asdict
-from typing import Optional, List, Dict, Any
+from typing import List, Dict
 from datetime import datetime
 
 # ============================================================================
-# VERSION
+# ⚠️ VERSION - MODIFIER ICI POUR VÉRIFIER LE DÉPLOIEMENT
 # ============================================================================
-VERSION = "9.1.0"
+VERSION = "9.2.0"
 BUILD_DATE = "2025-01-19"
+BUILD_ID = "BUILD-2025JAN19-1530"  # Change ce ID à chaque push
 
 # ============================================================================
 # CONFIG
@@ -28,34 +29,47 @@ st.set_page_config(
 )
 
 # ============================================================================
-# SESSION STATE INIT
+# 🚨 BANDEAU VERSION ULTRA VISIBLE 🚨
+# ============================================================================
+st.markdown(f"""
+<div style="
+    background: linear-gradient(90deg, #FF6B6B, #4ECDC4);
+    color: white;
+    padding: 15px 25px;
+    border-radius: 10px;
+    margin-bottom: 20px;
+    text-align: center;
+    font-size: 18px;
+    font-weight: bold;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+">
+    🛡️ AAS VERSION {VERSION} | Build: {BUILD_ID} | Date: {BUILD_DATE}
+</div>
+""", unsafe_allow_html=True)
+
+# ============================================================================
+# SESSION STATE
 # ============================================================================
 if 'logs' not in st.session_state:
     st.session_state.logs = []
 if 'entity' not in st.session_state:
     st.session_state.entity = None
-if 'social_links' not in st.session_state:
-    st.session_state.social_links = {}
-if 'mistral_key' not in st.session_state:
-    st.session_state.mistral_key = ''
-if 'authenticated' not in st.session_state:
-    st.session_state.authenticated = False
 if 'wiki_results' not in st.session_state:
     st.session_state.wiki_results = []
 if 'insee_results' not in st.session_state:
     st.session_state.insee_results = []
-if 'last_error' not in st.session_state:
-    st.session_state.last_error = None
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+if 'mistral_key' not in st.session_state:
+    st.session_state.mistral_key = ''
 
 
 def log(msg: str, level: str = "INFO"):
-    """Ajoute un log horodaté."""
-    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    icons = {"INFO": "ℹ️", "OK": "✅", "ERROR": "❌", "WARN": "⚠️", "DEBUG": "🔧", "HTTP": "🌐"}
-    icon = icons.get(level, "•")
-    entry = f"{icon} [{timestamp}] [{level}] {msg}"
+    """Log avec timestamp."""
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    icons = {"INFO": "ℹ️", "OK": "✅", "ERROR": "❌", "WARN": "⚠️", "HTTP": "🌐", "DEBUG": "🔧"}
+    entry = f"{icons.get(level, '•')} [{ts}] {msg}"
     st.session_state.logs.append(entry)
-    # Garder max 100 logs
     if len(st.session_state.logs) > 100:
         st.session_state.logs = st.session_state.logs[-100:]
 
@@ -71,12 +85,10 @@ class Entity:
     description_fr: str = ""
     description_en: str = ""
     expertise_fr: str = ""
-    expertise_en: str = ""
     qid: str = ""
     siren: str = ""
     siret: str = ""
     lei: str = ""
-    naf: str = ""
     website: str = ""
     org_type: str = "Organization"
     parent_org_name: str = ""
@@ -85,12 +97,11 @@ class Entity:
 
     def score(self) -> int:
         s = 0
-        if self.qid: s += 20
-        if self.siren: s += 20
+        if self.qid: s += 25
+        if self.siren: s += 25
         if self.lei: s += 15
         if self.website: s += 15
-        if self.parent_org_qid: s += 15
-        if self.expertise_fr: s += 15
+        if self.parent_org_qid: s += 20
         return min(s, 100)
 
 
@@ -99,12 +110,14 @@ if st.session_state.entity is None:
 
 
 # ============================================================================
-# WIKIDATA API - AVEC LOGS DÉTAILLÉS
+# WIKIDATA API
 # ============================================================================
 def wikidata_search(query: str) -> List[Dict]:
-    """Recherche Wikidata avec logs détaillés."""
+    """Recherche Wikidata avec logs."""
     
-    log(f"=== WIKIDATA SEARCH START: '{query}' ===", "INFO")
+    log(f"{'='*50}", "INFO")
+    log(f"WIKIDATA SEARCH: '{query}'", "INFO")
+    log(f"Version: {VERSION} | Build: {BUILD_ID}", "DEBUG")
     
     url = "https://www.wikidata.org/w/api.php"
     params = {
@@ -115,129 +128,80 @@ def wikidata_search(query: str) -> List[Dict]:
         "format": "json",
         "limit": 10,
         "type": "item",
-        "origin": "*"  # CORS
+        "origin": "*"
     }
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-        "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive"
+        "User-Agent": f"AAS-Bot/{VERSION} (Streamlit Cloud; contact@example.com)",
+        "Accept": "application/json"
     }
     
     log(f"URL: {url}", "DEBUG")
-    log(f"Params: {params}", "DEBUG")
+    log(f"Params: action=wbsearchentities, search={query}", "DEBUG")
     
-    # Retry loop
     for attempt in range(3):
-        log(f"Tentative {attempt + 1}/3...", "HTTP")
-        
         try:
-            start_time = time.time()
+            log(f"Tentative {attempt+1}/3...", "HTTP")
             
-            response = requests.get(
-                url,
-                params=params,
-                headers=headers,
-                timeout=30,
-                verify=True
-            )
+            t0 = time.time()
+            response = requests.get(url, params=params, headers=headers, timeout=30)
+            elapsed = round(time.time() - t0, 2)
             
-            elapsed = round(time.time() - start_time, 2)
-            log(f"Response en {elapsed}s - Status: {response.status_code}", "HTTP")
-            
-            # Log response headers
-            log(f"Content-Type: {response.headers.get('Content-Type', 'N/A')}", "DEBUG")
-            log(f"Content-Length: {response.headers.get('Content-Length', 'N/A')}", "DEBUG")
+            log(f"HTTP {response.status_code} en {elapsed}s", "HTTP")
             
             if response.status_code == 200:
-                try:
-                    data = response.json()
-                    log(f"JSON parsé OK", "DEBUG")
+                data = response.json()
+                
+                if 'search' in data:
+                    results = data['search']
+                    log(f"✅ {len(results)} résultats trouvés!", "OK")
                     
-                    # Vérifier la structure
-                    if 'search' in data:
-                        results = data['search']
-                        log(f"Trouvé {len(results)} résultats", "OK")
-                        
-                        output = []
-                        for item in results:
-                            qid = item.get('id', '?')
-                            label = item.get('label', qid)
-                            desc = item.get('description', '')
-                            log(f"  → {qid}: {label}", "DEBUG")
-                            output.append({
-                                'qid': qid,
-                                'label': label,
-                                'desc': desc
-                            })
-                        
-                        log(f"=== WIKIDATA SEARCH SUCCESS ===", "OK")
-                        return output
-                    else:
-                        log(f"Pas de clé 'search' dans la réponse", "ERROR")
-                        log(f"Clés disponibles: {list(data.keys())}", "DEBUG")
-                        if 'error' in data:
-                            log(f"Erreur API: {data['error']}", "ERROR")
-                        
-                except json.JSONDecodeError as e:
-                    log(f"Erreur JSON: {str(e)}", "ERROR")
-                    log(f"Response text (500 premiers chars): {response.text[:500]}", "DEBUG")
+                    for item in results[:3]:
+                        log(f"  → {item['id']}: {item.get('label', '?')}", "DEBUG")
+                    
+                    return [{
+                        'qid': item['id'],
+                        'label': item.get('label', item['id']),
+                        'desc': item.get('description', '')
+                    } for item in results]
+                else:
+                    log(f"❌ Pas de 'search' dans réponse", "ERROR")
+                    log(f"Clés: {list(data.keys())}", "DEBUG")
+                    if 'error' in data:
+                        log(f"API Error: {data['error']}", "ERROR")
+                    return []
             
             elif response.status_code == 429:
-                log(f"Rate limit (429) - Attente {2**attempt}s...", "WARN")
-                time.sleep(2 ** attempt)
+                wait = 2 ** attempt
+                log(f"Rate limit 429 - Attente {wait}s", "WARN")
+                time.sleep(wait)
                 continue
-                
-            elif response.status_code == 403:
-                log(f"Forbidden (403) - Possible blocage User-Agent", "ERROR")
-                log(f"Response: {response.text[:300]}", "DEBUG")
-                
-            elif response.status_code >= 500:
-                log(f"Erreur serveur ({response.status_code}) - Retry...", "WARN")
-                time.sleep(2)
-                continue
-                
+            
             else:
-                log(f"HTTP Error {response.status_code}", "ERROR")
-                log(f"Response: {response.text[:300]}", "DEBUG")
+                log(f"❌ HTTP {response.status_code}", "ERROR")
+                log(f"Response: {response.text[:200]}", "DEBUG")
                 
         except requests.Timeout:
-            log(f"TIMEOUT après 30s (tentative {attempt + 1})", "ERROR")
+            log(f"⏱️ TIMEOUT 30s (tentative {attempt+1})", "ERROR")
             if attempt < 2:
-                log("Nouvelle tentative...", "WARN")
                 time.sleep(2)
                 continue
-                
         except requests.ConnectionError as e:
-            log(f"CONNECTION ERROR: {str(e)[:100]}", "ERROR")
-            st.session_state.last_error = f"ConnectionError: {str(e)}"
-            if attempt < 2:
-                time.sleep(2)
-                continue
-                
-        except requests.RequestException as e:
-            log(f"REQUEST ERROR: {type(e).__name__}: {str(e)[:100]}", "ERROR")
-            st.session_state.last_error = str(e)
-            
+            log(f"🔌 CONNECTION ERROR: {str(e)[:80]}", "ERROR")
         except Exception as e:
-            log(f"UNEXPECTED ERROR: {type(e).__name__}: {str(e)[:100]}", "ERROR")
-            st.session_state.last_error = str(e)
-            import traceback
-            log(f"Traceback: {traceback.format_exc()[:300]}", "DEBUG")
+            log(f"💥 EXCEPTION: {type(e).__name__}: {str(e)[:80]}", "ERROR")
     
-    log(f"=== WIKIDATA SEARCH FAILED ===", "ERROR")
+    log(f"❌ ÉCHEC après 3 tentatives", "ERROR")
     return []
 
 
 def wikidata_get_entity(qid: str) -> Dict:
-    """Récupère détails entité avec logs."""
+    """Récupère détails entité."""
     
-    log(f"=== WIKIDATA GET ENTITY: {qid} ===", "INFO")
+    log(f"GET ENTITY: {qid}", "INFO")
     
     result = {
-        "name_fr": "", "name_en": "", "desc_fr": "", "desc_en": "",
+        "name_fr": "", "name_en": "", "desc_fr": "",
         "siren": "", "lei": "", "website": "",
         "parent_name": "", "parent_qid": ""
     }
@@ -248,153 +212,113 @@ def wikidata_get_entity(qid: str) -> Dict:
         "ids": qid,
         "languages": "fr|en",
         "props": "labels|descriptions|claims",
-        "format": "json",
-        "origin": "*"
+        "format": "json"
     }
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json"
-    }
+    headers = {"User-Agent": f"AAS-Bot/{VERSION}"}
     
     try:
-        log(f"Requête wbgetentities...", "HTTP")
         response = requests.get(url, params=params, headers=headers, timeout=30)
-        log(f"Status: {response.status_code}", "HTTP")
+        log(f"HTTP {response.status_code}", "HTTP")
         
         if response.status_code == 200:
             data = response.json()
+            entity = data.get('entities', {}).get(qid, {})
             
-            if 'entities' in data and qid in data['entities']:
-                entity = data['entities'][qid]
-                log(f"Entité trouvée", "OK")
-                
-                # Labels
+            if entity:
                 labels = entity.get('labels', {})
+                descs = entity.get('descriptions', {})
+                claims = entity.get('claims', {})
+                
                 result["name_fr"] = labels.get('fr', {}).get('value', '')
                 result["name_en"] = labels.get('en', {}).get('value', '')
-                log(f"Nom FR: {result['name_fr']}", "DEBUG")
-                
-                # Descriptions
-                descs = entity.get('descriptions', {})
                 result["desc_fr"] = descs.get('fr', {}).get('value', '')
-                result["desc_en"] = descs.get('en', {}).get('value', '')
                 
-                # Claims
-                claims = entity.get('claims', {})
-                log(f"Nombre de claims: {len(claims)}", "DEBUG")
+                log(f"Nom: {result['name_fr']}", "OK")
+                log(f"Claims disponibles: {len(claims)}", "DEBUG")
                 
-                # P1616 = SIREN
+                # SIREN P1616
                 if 'P1616' in claims:
                     try:
                         result["siren"] = claims['P1616'][0]['mainsnak']['datavalue']['value']
-                        log(f"SIREN (P1616): {result['siren']}", "OK")
-                    except (KeyError, IndexError) as e:
-                        log(f"Erreur extraction SIREN: {e}", "WARN")
+                        log(f"SIREN: {result['siren']}", "OK")
+                    except:
+                        pass
                 
-                # P1278 = LEI
+                # LEI P1278
                 if 'P1278' in claims:
                     try:
                         result["lei"] = claims['P1278'][0]['mainsnak']['datavalue']['value']
-                        log(f"LEI (P1278): {result['lei']}", "OK")
+                        log(f"LEI: {result['lei']}", "OK")
                     except:
                         pass
                 
-                # P856 = Website
+                # Website P856
                 if 'P856' in claims:
                     try:
                         result["website"] = claims['P856'][0]['mainsnak']['datavalue']['value']
-                        log(f"Website (P856): {result['website']}", "OK")
+                        log(f"Website: {result['website']}", "OK")
                     except:
                         pass
                 
-                # P749 = Parent Organization
+                # Parent P749
                 if 'P749' in claims:
                     try:
-                        parent_value = claims['P749'][0]['mainsnak']['datavalue']['value']
-                        log(f"P749 raw value: {parent_value}", "DEBUG")
-                        
-                        if isinstance(parent_value, dict):
-                            result["parent_qid"] = parent_value.get('id', '')
-                        elif isinstance(parent_value, str):
-                            result["parent_qid"] = parent_value
+                        pval = claims['P749'][0]['mainsnak']['datavalue']['value']
+                        if isinstance(pval, dict):
+                            result["parent_qid"] = pval.get('id', '')
+                        log(f"Parent QID: {result['parent_qid']}", "OK")
                         
                         if result["parent_qid"]:
-                            log(f"Parent QID (P749): {result['parent_qid']}", "OK")
-                            # Récupérer le nom du parent
-                            result["parent_name"] = wikidata_get_label(result["parent_qid"])
-                            log(f"Parent Name: {result['parent_name']}", "OK")
+                            # Get parent name
+                            p_resp = requests.get(url, params={
+                                "action": "wbgetentities",
+                                "ids": result["parent_qid"],
+                                "languages": "fr|en",
+                                "props": "labels",
+                                "format": "json"
+                            }, headers=headers, timeout=10)
+                            if p_resp.status_code == 200:
+                                p_data = p_resp.json()
+                                p_labels = p_data.get('entities', {}).get(result["parent_qid"], {}).get('labels', {})
+                                result["parent_name"] = p_labels.get('fr', {}).get('value', '') or p_labels.get('en', {}).get('value', '')
+                                log(f"Parent: {result['parent_name']}", "OK")
                     except Exception as e:
-                        log(f"Erreur extraction P749: {e}", "WARN")
+                        log(f"Erreur P749: {e}", "WARN")
                 else:
-                    log(f"Pas de P749 (Parent Organization)", "DEBUG")
+                    log("Pas de Parent (P749)", "DEBUG")
                 
-                log(f"=== GET ENTITY SUCCESS ===", "OK")
+                log(f"✅ Entity chargée", "OK")
             else:
-                log(f"Entité {qid} non trouvée dans la réponse", "ERROR")
-                log(f"Clés entities: {list(data.get('entities', {}).keys())}", "DEBUG")
-        else:
-            log(f"HTTP {response.status_code}", "ERROR")
-            
+                log(f"Entity {qid} non trouvée", "ERROR")
     except Exception as e:
-        log(f"Exception: {type(e).__name__}: {str(e)}", "ERROR")
+        log(f"Exception: {e}", "ERROR")
     
     return result
 
 
-def wikidata_get_label(qid: str) -> str:
-    """Récupère le label d'un QID."""
-    try:
-        url = "https://www.wikidata.org/w/api.php"
-        params = {
-            "action": "wbgetentities",
-            "ids": qid,
-            "languages": "fr|en",
-            "props": "labels",
-            "format": "json"
-        }
-        headers = {"User-Agent": "Mozilla/5.0"}
-        
-        response = requests.get(url, params=params, headers=headers, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            labels = data.get('entities', {}).get(qid, {}).get('labels', {})
-            return labels.get('fr', {}).get('value', '') or labels.get('en', {}).get('value', qid)
-    except Exception as e:
-        log(f"Erreur get_label({qid}): {e}", "WARN")
-    return qid
-
-
 def insee_search(query: str) -> List[Dict]:
     """Recherche INSEE."""
-    log(f"=== INSEE SEARCH: '{query}' ===", "INFO")
+    log(f"INSEE SEARCH: '{query}'", "INFO")
     
     try:
-        url = "https://recherche-entreprises.api.gouv.fr/search"
-        params = {"q": query, "per_page": 10}
-        
-        response = requests.get(url, params=params, timeout=15)
-        log(f"INSEE Status: {response.status_code}", "HTTP")
+        response = requests.get(
+            "https://recherche-entreprises.api.gouv.fr/search",
+            params={"q": query, "per_page": 10},
+            timeout=15
+        )
+        log(f"INSEE HTTP {response.status_code}", "HTTP")
         
         if response.status_code == 200:
-            data = response.json()
-            results = data.get('results', [])
+            results = response.json().get('results', [])
             log(f"INSEE: {len(results)} résultats", "OK")
-            
             return [{
-                'siren': item.get('siren', ''),
-                'siret': item.get('siege', {}).get('siret', ''),
-                'name': item.get('nom_complet', ''),
-                'legal_name': item.get('nom_raison_sociale', ''),
-                'naf': item.get('activite_principale', ''),
-                'address': f"{item.get('siege', {}).get('adresse', '')} {item.get('siege', {}).get('code_postal', '')} {item.get('siege', {}).get('commune', '')}",
-                'active': item.get('etat_administratif') == 'A'
-            } for item in results]
-        else:
-            log(f"INSEE Error {response.status_code}", "ERROR")
+                'siren': r.get('siren', ''),
+                'name': r.get('nom_complet', ''),
+                'address': f"{r.get('siege', {}).get('adresse', '')} {r.get('siege', {}).get('code_postal', '')} {r.get('siege', {}).get('commune', '')}",
+                'active': r.get('etat_administratif') == 'A'
+            } for r in results]
     except Exception as e:
-        log(f"INSEE Exception: {e}", "ERROR")
-    
+        log(f"INSEE Error: {e}", "ERROR")
     return []
 
 
@@ -402,241 +326,231 @@ def insee_search(query: str) -> List[Dict]:
 # AUTH
 # ============================================================================
 if not st.session_state.authenticated:
-    st.title(f"🛡️ AAS v{VERSION}")
-    st.caption(f"Build: {BUILD_DATE}")
-    pwd = st.text_input("Mot de passe:", type="password")
-    if st.button("Déverrouiller", type="primary"):
-        if pwd == "SEOTOOLS":
-            st.session_state.authenticated = True
-            log("Authentification réussie", "OK")
-            st.rerun()
-        else:
-            st.error("❌ Mot de passe incorrect")
+    st.markdown(f"""
+    <div style="text-align: center; padding: 50px;">
+        <h1>🔐 Accès Restreint</h1>
+        <p style="color: #888;">Version {VERSION} | Build {BUILD_ID}</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        pwd = st.text_input("Mot de passe:", type="password")
+        if st.button("🔓 Déverrouiller", type="primary", use_container_width=True):
+            if pwd == "SEOTOOLS":
+                st.session_state.authenticated = True
+                log("Auth OK", "OK")
+                st.rerun()
+            else:
+                st.error("❌ Mot de passe incorrect")
     st.stop()
 
 
 # ============================================================================
 # MAIN LAYOUT
 # ============================================================================
-st.title(f"🛡️ Architecte d'Autorité Sémantique")
-st.caption(f"Version {VERSION} | Build {BUILD_DATE} | Streamlit Cloud")
 
-# Layout: 2 colonnes (main + logs)
-col_main, col_logs = st.columns([2, 1])
+# 2 colonnes: Main (gauche) + Logs (droite)
+main_col, log_col = st.columns([3, 2])
 
-with col_logs:
-    st.subheader("📟 Console Logs")
+# ============================================================================
+# COLONNE LOGS (DROITE)
+# ============================================================================
+with log_col:
+    st.markdown(f"""
+    <div style="
+        background: #1E1E1E;
+        border: 2px solid #4ECDC4;
+        border-radius: 10px;
+        padding: 10px;
+    ">
+        <h3 style="color: #4ECDC4; margin: 0;">📟 Console Logs v{VERSION}</h3>
+    </div>
+    """, unsafe_allow_html=True)
     
-    # Boutons de contrôle
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("🗑️ Clear Logs", use_container_width=True):
+        if st.button("🗑️ Clear", use_container_width=True):
             st.session_state.logs = []
             st.rerun()
     with c2:
         if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
     
-    # Zone de logs scrollable
-    log_container = st.container(height=500)
-    with log_container:
+    # Affichage logs
+    log_box = st.container(height=450)
+    with log_box:
         if st.session_state.logs:
-            for entry in reversed(st.session_state.logs):
-                if "[ERROR]" in entry:
-                    st.error(entry)
-                elif "[OK]" in entry:
-                    st.success(entry)
-                elif "[WARN]" in entry:
-                    st.warning(entry)
+            for entry in reversed(st.session_state.logs[-30:]):
+                if "ERROR" in entry or "❌" in entry:
+                    st.markdown(f"<span style='color:#FF6B6B'>{entry}</span>", unsafe_allow_html=True)
+                elif "OK" in entry or "✅" in entry:
+                    st.markdown(f"<span style='color:#4ECDC4'>{entry}</span>", unsafe_allow_html=True)
+                elif "WARN" in entry or "⚠️" in entry:
+                    st.markdown(f"<span style='color:#FFE66D'>{entry}</span>", unsafe_allow_html=True)
                 else:
                     st.text(entry)
         else:
-            st.info("Aucun log. Lancez une recherche.")
-    
-    # Dernière erreur
-    if st.session_state.last_error:
-        st.error(f"**Dernière erreur:** {st.session_state.last_error}")
+            st.info(f"Logs vides. Build: {BUILD_ID}")
 
-with col_main:
-    # Recherche
+# ============================================================================
+# COLONNE PRINCIPALE (GAUCHE)
+# ============================================================================
+with main_col:
     st.subheader("🔍 Recherche")
     
-    search_col1, search_col2 = st.columns([3, 1])
-    with search_col1:
-        search_query = st.text_input("Nom de l'organisation", placeholder="Ex: Boursorama, IKEA, BNP...")
-    with search_col2:
-        search_source = st.selectbox("Source", ["Wikidata", "INSEE", "Les deux"])
+    # Search bar
+    search_query = st.text_input("Organisation", placeholder="Ex: Boursorama, IKEA, BNP Paribas...")
     
-    btn_col1, btn_col2, btn_col3 = st.columns(3)
-    with btn_col1:
-        search_btn = st.button("🔎 Rechercher", type="primary", use_container_width=True)
-    with btn_col2:
-        test_btn = st.button("🧪 Test API", use_container_width=True)
-    with btn_col3:
-        reset_btn = st.button("🗑️ Reset", use_container_width=True)
+    src_col, btn_col = st.columns([1, 2])
+    with src_col:
+        source = st.selectbox("Source", ["Wikidata", "INSEE", "Les deux"], label_visibility="collapsed")
+    with btn_col:
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            search_btn = st.button("🔎 Rechercher", type="primary", use_container_width=True)
+        with b2:
+            test_btn = st.button("🧪 Test API", use_container_width=True)
+        with b3:
+            reset_btn = st.button("🗑️ Reset", use_container_width=True)
     
-    # Test API
+    # Actions
     if test_btn:
-        log("=== TEST API WIKIDATA ===", "INFO")
-        log("Test avec query='test'...", "INFO")
-        
-        with st.spinner("Test en cours..."):
+        log(f"=== TEST API v{VERSION} ===", "INFO")
+        with st.spinner("Test..."):
             results = wikidata_search("test")
-        
         if results:
-            st.success(f"✅ API Wikidata OK! ({len(results)} résultats)")
+            st.success(f"✅ Wikidata OK! {len(results)} résultats")
         else:
-            st.error("❌ API Wikidata ne répond pas")
+            st.error("❌ Wikidata ne répond pas - voir logs")
     
-    # Reset
     if reset_btn:
         st.session_state.entity = Entity()
         st.session_state.wiki_results = []
         st.session_state.insee_results = []
-        st.session_state.last_error = None
-        log("Reset effectué", "INFO")
+        log("Reset", "INFO")
         st.rerun()
     
-    # Recherche
     if search_btn and search_query:
-        log(f"Recherche lancée: '{search_query}' (source: {search_source})", "INFO")
-        
-        if search_source in ["Wikidata", "Les deux"]:
-            with st.spinner("Recherche Wikidata..."):
+        if source in ["Wikidata", "Les deux"]:
+            with st.spinner("Wikidata..."):
                 st.session_state.wiki_results = wikidata_search(search_query)
-        
-        if search_source in ["INSEE", "Les deux"]:
-            with st.spinner("Recherche INSEE..."):
+        if source in ["INSEE", "Les deux"]:
+            with st.spinner("INSEE..."):
                 st.session_state.insee_results = insee_search(search_query)
-        
         st.rerun()
     
     # Résultats Wikidata
     if st.session_state.wiki_results:
-        st.subheader(f"🌐 Résultats Wikidata ({len(st.session_state.wiki_results)})")
-        
-        for i, item in enumerate(st.session_state.wiki_results):
-            col1, col2, col3 = st.columns([1, 3, 1])
-            with col1:
-                st.code(item['qid'])
-            with col2:
+        st.markdown(f"**🌐 Wikidata ({len(st.session_state.wiki_results)})**")
+        for i, item in enumerate(st.session_state.wiki_results[:8]):
+            c1, c2, c3 = st.columns([2, 5, 2])
+            with c1:
+                st.code(item['qid'], language=None)
+            with c2:
                 st.write(f"**{item['label']}**")
-                st.caption(item['desc'][:80] if item['desc'] else "Pas de description")
-            with col3:
-                if st.button("✅ Sélect.", key=f"sel_wiki_{i}"):
-                    log(f"Sélection: {item['qid']}", "INFO")
-                    
-                    with st.spinner(f"Chargement {item['qid']}..."):
+                if item['desc']:
+                    st.caption(item['desc'][:60])
+            with c3:
+                if st.button("✅", key=f"w{i}", help="Sélectionner"):
+                    log(f"Selection: {item['qid']}", "INFO")
+                    with st.spinner("Chargement..."):
                         details = wikidata_get_entity(item['qid'])
-                    
                     e = st.session_state.entity
                     e.qid = item['qid']
                     e.name = details['name_fr'] or item['label']
                     e.name_en = details['name_en']
                     e.description_fr = details['desc_fr']
-                    e.description_en = details['desc_en']
                     e.siren = e.siren or details['siren']
                     e.lei = details['lei']
                     e.website = e.website or details['website']
                     e.parent_org_qid = details['parent_qid']
                     e.parent_org_name = details['parent_name']
-                    
-                    log(f"Entity mise à jour: {e.name}", "OK")
                     st.rerun()
     
     # Résultats INSEE
     if st.session_state.insee_results:
-        st.subheader(f"🏛️ Résultats INSEE ({len(st.session_state.insee_results)})")
-        
-        for i, item in enumerate(st.session_state.insee_results):
-            col1, col2, col3 = st.columns([1, 3, 1])
-            with col1:
-                status = "🟢" if item['active'] else "🔴"
-                st.write(f"{status} {item['siren']}")
-            with col2:
+        st.markdown(f"**🏛️ INSEE ({len(st.session_state.insee_results)})**")
+        for i, item in enumerate(st.session_state.insee_results[:6]):
+            c1, c2, c3 = st.columns([2, 5, 2])
+            with c1:
+                st.write("🟢" if item['active'] else "🔴", item['siren'])
+            with c2:
                 st.write(f"**{item['name']}**")
-                st.caption(item['address'][:60])
-            with col3:
-                if st.button("✅ Sélect.", key=f"sel_insee_{i}"):
+            with c3:
+                if st.button("✅", key=f"i{i}"):
                     e = st.session_state.entity
                     e.name = e.name or item['name']
-                    e.legal_name = item['legal_name']
                     e.siren = item['siren']
-                    e.siret = item['siret']
-                    e.naf = item['naf']
                     e.address = item['address']
-                    log(f"INSEE chargé: {item['name']}", "OK")
+                    log(f"INSEE: {item['name']}", "OK")
                     st.rerun()
     
-    # Entity Details
+    # Entity
     st.divider()
     e = st.session_state.entity
     
     if e.name or e.qid or e.siren:
-        st.subheader("📋 Entité Sélectionnée")
+        st.subheader("📋 Entité")
         
-        # Métriques
+        # Metrics
         m1, m2, m3, m4 = st.columns(4)
-        with m1:
-            st.metric("Score", f"{e.score()}/100")
-        with m2:
-            st.metric("QID", e.qid or "—")
-        with m3:
-            st.metric("SIREN", e.siren or "—")
-        with m4:
-            st.metric("Parent", e.parent_org_qid or "—")
+        m1.metric("Score", f"{e.score()}%")
+        m2.metric("QID", e.qid or "—")
+        m3.metric("SIREN", e.siren or "—")
+        m4.metric("Parent", e.parent_org_qid or "—")
         
         # Tabs
-        tabs = st.tabs(["🆔 Identité", "🔗 Filiation", "💾 JSON-LD"])
+        tabs = st.tabs(["Identité", "Filiation", "JSON-LD"])
         
         with tabs[0]:
             c1, c2 = st.columns(2)
             with c1:
                 e.name = st.text_input("Nom", e.name)
-                e.legal_name = st.text_input("Raison sociale", e.legal_name)
                 e.siren = st.text_input("SIREN", e.siren)
                 e.qid = st.text_input("QID", e.qid)
             with c2:
-                e.website = st.text_input("Site web", e.website)
+                e.website = st.text_input("Website", e.website)
                 e.lei = st.text_input("LEI", e.lei)
-                e.address = st.text_input("Adresse", e.address)
                 e.org_type = st.selectbox("Type", ["Organization", "Corporation", "LocalBusiness", "BankOrCreditUnion"])
         
         with tabs[1]:
-            st.write("**Parent Organization (P749)**")
             c1, c2 = st.columns(2)
             with c1:
-                e.parent_org_name = st.text_input("Nom maison mère", e.parent_org_name)
+                e.parent_org_name = st.text_input("Parent Name", e.parent_org_name)
             with c2:
-                e.parent_org_qid = st.text_input("QID maison mère", e.parent_org_qid)
-            
+                e.parent_org_qid = st.text_input("Parent QID", e.parent_org_qid)
             if e.parent_org_qid:
-                st.success(f"✅ Lié à: [{e.parent_org_name}](https://www.wikidata.org/wiki/{e.parent_org_qid})")
+                st.success(f"✅ [{e.parent_org_name}](https://www.wikidata.org/wiki/{e.parent_org_qid})")
         
         with tabs[2]:
-            # JSON-LD
             json_ld = {
                 "@context": "https://schema.org",
                 "@type": e.org_type,
-                "name": e.name
-            }
-            if e.website:
-                json_ld["url"] = e.website
-            if e.siren:
-                json_ld["taxID"] = f"FR{e.siren}"
-            if e.qid:
-                json_ld["sameAs"] = f"https://www.wikidata.org/wiki/{e.qid}"
-            if e.parent_org_name:
-                json_ld["parentOrganization"] = {
+                "name": e.name,
+                "url": e.website or None,
+                "taxID": f"FR{e.siren}" if e.siren else None,
+                "sameAs": f"https://www.wikidata.org/wiki/{e.qid}" if e.qid else None,
+                "parentOrganization": {
                     "@type": "Organization",
                     "name": e.parent_org_name,
-                    "sameAs": f"https://www.wikidata.org/wiki/{e.parent_org_qid}" if e.parent_org_qid else None
-                }
+                    "sameAs": f"https://www.wikidata.org/wiki/{e.parent_org_qid}"
+                } if e.parent_org_name else None
+            }
+            # Clean None values
+            json_ld = {k: v for k, v in json_ld.items() if v is not None}
             
             st.json(json_ld)
-            st.download_button("💾 Télécharger", json.dumps(json_ld, indent=2, ensure_ascii=False), "jsonld.json")
+            st.download_button("💾 Download", json.dumps(json_ld, indent=2), "schema.json")
     else:
-        st.info("👆 Recherchez une organisation ci-dessus")
+        st.info("👆 Recherchez une organisation")
 
+# ============================================================================
+# FOOTER
+# ============================================================================
 st.divider()
-st.caption(f"🛡️ AAS v{VERSION} | {BUILD_DATE} | Wikidata + INSEE")
+st.markdown(f"""
+<div style="text-align: center; color: #888; padding: 10px;">
+    🛡️ <strong>AAS v{VERSION}</strong> | Build: <code>{BUILD_ID}</code> | {BUILD_DATE} | Wikidata + INSEE
+</div>
+""", unsafe_allow_html=True)
